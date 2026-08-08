@@ -40,16 +40,19 @@ def import_tracks(dataframe, database):
     try:
         database.commit()
         return import_amt
-    except SQLAlchemyError:
+    except SQLAlchemyError as e:
         database.rollback()
-        print("Import failed")
+        print(f"Import failed: {e}")
         return 0
 
 def main():
     Base.metadata.create_all(engine)
     db = SessionLocal()
     df = load_dataset("data/spotifydatabase.csv")
-    if df != None:
+    if df is not None:
         num_of_imports = import_tracks(df, db)
         print(f"Loaded {num_of_imports} songs")
     db.close()
+
+if __name__ == "__main__":
+    main()
