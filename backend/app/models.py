@@ -7,7 +7,7 @@ class Track(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     # Metadata
-    track_id = Column(String, unique=True)
+    track_id = Column(String)
     track_name = Column(String)
     artists = Column(String)
     album_name = Column(String)
