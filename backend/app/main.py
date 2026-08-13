@@ -139,6 +139,7 @@ def get_recommendations(request: RecRequest):
     with SessionLocal() as db:
         tracks = db.execute(statement).scalars().all()
         for track in tracks:
+            '''This section requires weighting to improve recommendation predictions'''
             score = 0
 
             if request.energy is not None:
@@ -149,6 +150,9 @@ def get_recommendations(request: RecRequest):
 
             if request.valence is not None:
                 score += abs(track.valence - request.valence)
+
+            if request.popularity is not None:
+                score += abs(track.popularity - request.popularity)
 
             recommendations.append((track, score))
 

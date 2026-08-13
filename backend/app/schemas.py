@@ -25,5 +25,5 @@ class RecRequest(BaseModel):
     energy: float | None = Field(None, ge=0.0, le=1.0)
     danceability: float | None = Field(None, ge=0.0, le=1.0)
     valence: float | None = Field(None, ge=0.0, le=1.0)
-    #popularity: float | None = Field(None, ge=0.0, le=100)
+    popularity: float | None = Field(None, ge=0.0, le=100)
     limit: int = Field(10, ge=1, le=50)
