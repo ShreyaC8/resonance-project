@@ -27,3 +27,11 @@ class RecRequest(BaseModel):
     valence: float | None = Field(None, ge=0.0, le=1.0)
     popularity: float | None = Field(None, ge=0.0, le=100)
     limit: int = Field(10, ge=1, le=50)
+
+class RecResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    track_id : str
+    track_name : str
+    artists : str
+    score : float

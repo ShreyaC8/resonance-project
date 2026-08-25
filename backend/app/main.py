@@ -1,10 +1,10 @@
 from.database import Base, engine, SessionLocal
 from.models import Track
-from.schemas import TrackQueryResponse, RecRequest
+from.schemas import TrackQueryResponse, RecRequest, RecResponse
 from fastapi import FastAPI, Query
 from typing import Annotated
 from pydantic import AfterValidator
-from sqlalchemy import select, func
+from sqlalchemy import select, func, distinct
 
 app = FastAPI()
 
@@ -52,6 +52,12 @@ def check_genre(genre: str):
         raise ValueError('Invalid genre')
     else:
         return genre
+
+def check_request(request: RecRequest):
+    if all([request.genre, request.energy, request.danceability, request.valence, request.popularity]) is None:
+        raise ValueError('No requirements entered')
+    else:
+        return request
 
 def key_helper(scored_track):
     return scored_track[1]
@@ -124,17 +130,17 @@ def get_tracks(
         }
         return result
 
-@app.get("/recommend")
-def get_recommendations(request: RecRequest):
+@app.get("/recommend", response_model = list[RecResponse])
+def get_recommendations(request: Annotated[RecRequest | None, AfterValidator(check_request)] = None):
     recommendations = []
+    response = []
+    statement = select(Track)
 
     ''' Method to compare genre can be more sophisticated 
     (e.g. pop fans may enjoy indie pop)
     Maybe use string matching to filter related genres as an improvement'''
     if request.genre is not None:
-        statement = select(Track).filter(Track.track_genre == request.genre)
-    else:
-        statement = select(Track)
+        statement = statement.filter(Track.track_genre == request.genre)
 
     with SessionLocal() as db:
         tracks = db.execute(statement).scalars().all()
@@ -151,11 +157,28 @@ def get_recommendations(request: RecRequest):
             if request.valence is not None:
                 score += abs(track.valence - request.valence)
 
+            #Popularity needs to be normalised from 0-100 to 0-1
             if request.popularity is not None:
-                score += abs(track.popularity - request.popularity)
+                score += 0.01*abs(track.popularity - request.popularity)
 
             recommendations.append((track, score))
 
         recommendations = recommendations.sort(key=key_helper)[:request.limit]
+        if recommendations is None:
+            return 'No tracks recommended'
+        
+        for (track, score) in recommendations:
+            response.append({
+                "track_id": track.track_id,
+                "track_name": track.track_name,
+                "artists": track.artists,
+                "score": score
+            })
+        
+        return response
 
-        return recommendations
+@app.get("/genre")
+def get_genres():
+    with SessionLocal() as db:
+        genres = db.execute(select(distinct(Track.track_genre))).scalars().all()
+        return genres
