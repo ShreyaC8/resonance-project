@@ -18,15 +18,14 @@ class TrackQueryResponse(BaseModel):
     limit : int
     offset : int
 
-class RecRequest(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class TrackInput(BaseModel):
+    track_id: str
+    track_name: str
+    artists: str
 
-    genre: str | None = None
-    energy: float | None = Field(None, ge=0.0, le=1.0)
-    danceability: float | None = Field(None, ge=0.0, le=1.0)
-    valence: float | None = Field(None, ge=0.0, le=1.0)
-    popularity: float | None = Field(None, ge=0.0, le=100)
-    limit: int = Field(10, ge=1, le=50)
+class RecRequest(BaseModel):
+    tracks: list[TrackInput] = Field(min_length = 1, max_length = 5)
+    limit: int = Field(default = 10, ge = 1, le = 50)
 
 class RecResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -35,3 +34,4 @@ class RecResponse(BaseModel):
     track_name : str
     artists : str
     score : float
+    reason : str

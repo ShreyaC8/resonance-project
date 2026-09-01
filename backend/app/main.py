@@ -1,12 +1,21 @@
-from.database import Base, engine, SessionLocal
-from.models import Track
-from.schemas import TrackQueryResponse, RecRequest, RecResponse
-from fastapi import FastAPI, Query
+from app.database import Base, engine, SessionLocal
+from app.models import Track
+from app.schemas import TrackQueryResponse, RecRequest, RecResponse
+from fastapi import FastAPI, Query, Depends, HTTPException
 from typing import Annotated
 from pydantic import AfterValidator
 from sqlalchemy import select, func, distinct
+from sqlalchemy.orm import Session
 
 app = FastAPI()
+
+#For unit testing:
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 sort_options = {
         "track_id": Track.track_id,
@@ -53,14 +62,37 @@ def check_genre(genre: str):
     else:
         return genre
 
-def check_request(request: RecRequest):
-    if all([request.genre, request.energy, request.danceability, request.valence, request.popularity]) is None:
-        raise ValueError('No requirements entered')
-    else:
-        return request
-
 def key_helper(scored_track):
     return scored_track[1]
+
+def calculate_profile(tracks):
+    num_of_tracks = len(tracks)
+    profile = {
+        "energy": sum(t.energy for t in tracks) / num_of_tracks,
+        "danceability": sum(t.danceability for t in tracks) / num_of_tracks,
+        "valence": sum(t.valence for t in tracks) / num_of_tracks
+    }
+    return profile
+
+def calculate_similarity(track, profile):
+    distance = 0
+    if track.energy is not None:
+        distance += 4*abs(track.energy - profile["energy"])
+    if track.danceability is not None:
+        distance += 3*abs(track.danceability - profile["danceability"])
+    if track.valence is not None:
+        distance += 3*abs(track.valence - profile["valence"])
+    similarity = (1 - distance) * 100
+    return distance, similarity
+
+def similarity_description(difference):
+    if difference < 0.05:
+        return "Very similar"
+    if difference < 0.15:
+        return "Similar"
+    if difference < 0.30:
+        return "Somewhat different"
+    return "Very different"
 
 @app.get("/")
 def basic_message():
@@ -130,22 +162,119 @@ def get_tracks(
         }
         return result
 
-@app.get("/recommend", response_model = list[RecResponse])
-def get_recommendations(request: Annotated[RecRequest | None, AfterValidator(check_request)] = None):
+@app.get("/tracks/search")
+def search_tracks(q: str = Query(min_length=1), limit: int = Query(10, ge=1, le=50)):
+    statement = select(Track.track_id, Track.track_name, Track.artists).where(Track.artists.contains(str) or Track.track_name.contains(str)).limit(limit)
+    with SessionLocal() as db:
+        track_options = db.execute(statement).scalars().all()
+        if not track_options:
+            return ValueError("No matching results")
+        return track_options
+
+''' app.post is used here as the server is being sent data to compute recommended tracks with'''
+@app.post("/recommend", response_model = list[RecResponse])
+@app.post("/recommend", response_model=list[RecResponse])
+def get_recommendations(
+    request: RecRequest,
+    db: Session = Depends(get_db)
+):
+    track_ids = [track.track_id for track in request.tracks]
+    recommendations = []
+
+    seed_tracks = (
+        db.execute(
+            select(Track).where(Track.track_id.in_(track_ids))
+        )
+        .scalars()
+        .all()
+    )
+
+    if not seed_tracks:
+        raise HTTPException(status_code=404, detail="No matching seed tracks")
+
+    profile = calculate_profile(seed_tracks)
+
+    all_tracks = db.execute(select(Track)).scalars().all()
+
+    for track in all_tracks:
+        if track.track_id in track_ids:
+            continue
+
+        difference, similarity = calculate_similarity(track, profile)
+        description = similarity_description(difference)
+
+        recommendations.append(
+            (track, similarity, description)
+        )
+
+    recommendations.sort(key=lambda x: x[1], reverse=True)
+    recommendations = recommendations[:request.limit]
+
+    return [
+        {
+            "track_id": track.track_id,
+            "track_name": track.track_name,
+            "artists": track.artists,
+            "score": similarity,
+            "reason": description
+        }
+        for track, similarity, description in recommendations
+    ]
+'''def get_recommendations(request: RecRequest):
+    track_ids = []
+    recommendations = []
+    response = []
+
+    for track in request.tracks:
+        track_ids.append(track.track_id)
+
+    with SessionLocal() as db:
+        seed_tracks = db.execute(select(Track).where(Track.track_id.in_(track_ids))).scalars().all()
+        profile = calculate_profile(seed_tracks)
+
+        all_tracks = db.execute(select(Track)).scalars().all()
+        for track in all_tracks:
+            #Ensure entered tracks do not appear as recommendations
+            if track.track_id in track_ids:
+                continue
+
+            difference, similarity = calculate_similarity(track, profile)
+            description = similarity_description(difference)
+            recommendations.append((track, similarity, description))
+        
+        recommendations.sort(reverse=True, key=key_helper)
+        recommendations = recommendations[:request.limit]
+        
+        if not recommendations:
+            return 'No tracks recommended'
+                
+        for (track, similarity, description) in recommendations:
+            response.append({
+                "track_id": track.track_id,
+                "track_name": track.track_name,
+                "artists": track.artists,
+                "score": similarity,
+                "reason": description
+            })
+                
+        return response    
+'''
+
+'''
     recommendations = []
     response = []
     statement = select(Track)
 
-    ''' Method to compare genre can be more sophisticated 
+     Method to compare genre can be more sophisticated 
     (e.g. pop fans may enjoy indie pop)
-    Maybe use string matching to filter related genres as an improvement'''
+    Maybe use string matching to filter related genres as an improvement
     if request.genre is not None:
         statement = statement.filter(Track.track_genre == request.genre)
 
     with SessionLocal() as db:
         tracks = db.execute(statement).scalars().all()
         for track in tracks:
-            '''This section requires weighting to improve recommendation predictions'''
+            This section requires weighting to improve recommendation predictions
             score = 0
 
             if request.energy is not None:
@@ -163,8 +292,10 @@ def get_recommendations(request: Annotated[RecRequest | None, AfterValidator(che
 
             recommendations.append((track, score))
 
-        recommendations = recommendations.sort(key=key_helper)[:request.limit]
-        if recommendations is None:
+        recommendations.sort(key=key_helper)
+        recommendations = recommendations[:request.limit]
+
+        if not recommendations:
             return 'No tracks recommended'
         
         for (track, score) in recommendations:
@@ -176,6 +307,7 @@ def get_recommendations(request: Annotated[RecRequest | None, AfterValidator(che
             })
         
         return response
+'''
 
 @app.get("/genre")
 def get_genres():

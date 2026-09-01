@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, Float, String, Boolean
-from.database import Base
+from app.database import Base
 
 class Track(Base):
     __tablename__ = "tracks"
