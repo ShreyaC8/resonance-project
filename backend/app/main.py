@@ -1,11 +1,10 @@
-import numpy as np
 from app.database import Base, engine, SessionLocal
 from app.models import Track
 from app.schemas import TrackQueryResponse, RecRequest, RecResponse
 from fastapi import FastAPI, Query, Depends, HTTPException
 from typing import Annotated
 from pydantic import AfterValidator
-from sqlalchemy import select, func, distinct
+from sqlalchemy import select, func, distinct, or_
 from sqlalchemy.orm import Session
 
 app = FastAPI()
@@ -266,24 +265,74 @@ def calculate_similarity(track, profile):
     if track.valence is not None:
         distance += 0.3*abs(track.valence - profile["valence"])
     similarity = (1 - distance) * 100
-    return distance, similarity
+    return similarity
 
 def calculate_genre_score(candidate_genre, seed_genres):
-    scores = []
+    best_score = 0
+    best_genre = None
     for seed_genre in seed_genres:
         score = GENRE_SCORES.get(seed_genre, {}).get(candidate_genre, 0)
-        scores.append(score)
-    #Take maximum as candidate song needs to be strongly related to one of user's interests to be a good discovery
-    return max(scores, default=0)
+        #Take maximum as candidate song needs to be strongly related to one of user's interests to be a good discovery
+        if score > best_score:
+            best_score = score
+            best_genre = seed_genre
+    return best_score, best_genre
 
-def similarity_description(difference):
-    if difference < 0.05:
-        return "Very similar"
-    if difference < 0.15:
-        return "Similar"
-    if difference < 0.30:
-        return "Somewhat different"
-    return "Very different"
+def candidate_similarity(track1, track2):
+    distance = (
+        0.4 * abs(track1.energy - track2.energy)
+        + 0.3 * abs(track1.danceability - track2.danceability)
+        + 0.3 * abs(track1.valence - track2.valence)
+    )
+    return 1 - distance
+
+def mmr_rerank(candidates, limit, lambda_value=0.8):
+    selected = []
+    while candidates and len(selected) < limit:
+        best_track = None
+        best_score = float("-inf")
+
+        for candidate in candidates:
+            track = candidate[0]
+            relevance = candidate[1] / 100
+
+            if not selected:
+                diversity_penalty = 0
+            else:
+                diversity_penalty = max(
+                    candidate_similarity(track, chosen[0])
+                    for chosen in selected
+                )
+
+            mmr_score = (
+                lambda_value * relevance - (1 - lambda_value) * diversity_penalty
+            )
+
+            if mmr_score > best_score:
+                best_score = mmr_score
+                best_track = candidate
+
+        selected.append(best_track)
+        candidates.remove(best_track)
+    return selected
+
+def audio_reasoning(similarity):
+    if similarity >= 90:
+        audio_reason = "Very similar audio characteristics"
+    elif similarity >= 70:
+        audio_reason = "Similar audio characteristics"
+    else:
+        audio_reason = "Somewhat similar audio characteristics"
+    return audio_reason
+
+def genre_reasoning(genre_score, matching_genre):
+    if genre_score >= 0.7:
+        genre_reason = f"genre closely related to your {matching_genre} taste"
+    elif genre_score >= 0.4:
+        genre_reason = f"genre somewhat related to your {matching_genre} taste"
+    else:
+        genre_reason = "genre less closely related to your selected tracks"
+    return genre_reason
 
 @app.get("/")
 def basic_message():
@@ -355,11 +404,15 @@ def get_tracks(
 
 @app.get("/tracks/search")
 def search_tracks(q: str = Query(min_length=1), limit: int = Query(10, ge=1, le=50)):
-    statement = select(Track.track_id, Track.track_name, Track.artists).where(Track.artists.contains(str) or Track.track_name.contains(str)).limit(limit)
+    statement = select(Track.track_id, Track.track_name,Track.artists
+                        ).where(or_(
+                            Track.artists.contains(q),
+                            Track.track_name.contains(q))
+                        ).limit(limit)
     with SessionLocal() as db:
-        track_options = db.execute(statement).scalars().all()
+        track_options = db.execute(statement).all()
         if not track_options:
-            return ValueError("No matching results")
+            raise HTTPException(status_code=404, detail="No matching results")
         return track_options
 
 ''' app.post is used here as the server is being sent data to compute recommended tracks with'''
@@ -371,55 +424,57 @@ def get_recommendations(
     track_ids = [track.track_id for track in request.tracks]
     recommendations = []
 
-    seed_tracks = (
-        db.execute(
-            select(Track).where(Track.track_id.in_(track_ids))
-            ).scalars().all()
-    )
+    seed_tracks = db.execute(
+        select(Track).where(Track.track_id.in_(track_ids))
+        ).scalars().all()
 
     if not seed_tracks:
         raise HTTPException(status_code=404, detail="No matching seed tracks")
+    if any(
+        t.energy is None or t.danceability is None or t.valence is None 
+        for t in seed_tracks
+        ):
+        raise HTTPException(status_code=400,detail="Seed tracks must have energy, danceability, and valence")
 
     profile = calculate_profile(seed_tracks)
 
-    seed_genres = set([t.genre for t in seed_tracks])
+    seed_genres = set([t.track_genre for t in seed_tracks])
 
-    similar_genres = np.array([
-        RELATED_GENRES.get(seed_genre, [seed_genre])
+    genre_filter = {genre
         for seed_genre in seed_genres
-        ])
-
-    genre_filter = np.unique(similar_genres)
+        for genre in RELATED_GENRES.get(seed_genre, [seed_genre])
+    }
 
     gen_filtered_tracks = db.execute(
-        select(Track).filter(Track.genre.in_(genre_filter))
+        select(Track).filter(Track.track_genre.in_(genre_filter))
         ).scalars().all()
 
     for track in gen_filtered_tracks:
         if track.track_id in track_ids:
             continue
 
-        genre_score = calculate_genre_score(track.genre, seed_genres)
-        difference, similarity = calculate_similarity(track, profile)
+        genre_score, matching_genre = calculate_genre_score(track.track_genre, seed_genres)
+        similarity = calculate_similarity(track, profile)
         final_score = 0.85*similarity + 0.15*(genre_score*100)
 
-        description = similarity_description(difference)
+        audio_reason = audio_reasoning(similarity)
+        genre_reason = genre_reasoning(genre_score, matching_genre)
+        description = f"{audio_reason}, with a {genre_reason}"
 
-    
         recommendations.append((track, final_score, description))
 
     recommendations.sort(key=lambda x: x[1], reverse=True)
-    recommendations = recommendations[:request.limit]
+    recommendations = mmr_rerank(recommendations, request.limit)
 
     return [
         {
             "track_id": track.track_id,
             "track_name": track.track_name,
             "artists": track.artists,
-            "score": similarity,
-            "reason": description
+            "score": final_score,
+            "reason" : description
         }
-        for track, similarity, description in recommendations
+        for track, final_score, description in recommendations
     ]
 
 @app.get("/genre")
