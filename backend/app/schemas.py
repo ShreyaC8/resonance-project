@@ -35,3 +35,4 @@ class RecResponse(BaseModel):
     artists : str
     score : float
     reason : str
+

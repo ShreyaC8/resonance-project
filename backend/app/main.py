@@ -1,3 +1,4 @@
+import numpy as np
 from app.database import Base, engine, SessionLocal
 from app.models import Track
 from app.schemas import TrackQueryResponse, RecRequest, RecResponse
@@ -28,7 +29,7 @@ sort_options = {
         "valence": Track.valence
     }
 
-genre_options = [
+GENRE_OPTIONS = [
         "acoustic", "afrobeats", "alt-rock", "alternative", "ambient", "anime",
         "black-metal", "bluegrass", "blues", "brazil", "breakbeat", "british",
         "cantopop", "chicago-house", "children", "chill", "classical", "club",
@@ -50,6 +51,187 @@ genre_options = [
         "tango", "techno", "trance", "trip-hop", "turkish", "world-music"
     ]
 
+RELATED_GENRES = {
+    "indie": ["indie", "indie-pop", "alternative", "alt-rock", "psych-rock"],
+    "rock": ["rock", "alt-rock", "hard-rock", "punk-rock", "rock-n-roll", "grunge"],
+    "pop": ["pop", "indie-pop", "synth-pop", "power-pop", "dance"],
+    "electronic": ["electronic", "edm", "electro", "house", "techno", "idm"],
+    "house": ["house", "deep-house", "chicago-house", "progressive-house", "electro"],
+    "techno": ["techno", "detroit-techno", "minimal-techno", "electro"],
+    "hip-hop": ["hip-hop", "r-n-b", "soul", "funk"],
+    "r-n-b": ["r-n-b", "soul", "funk", "hip-hop"],
+    "metal": ["metal", "heavy-metal", "metalcore", "death-metal", "black-metal", "grindcore"],
+    "punk": ["punk", "punk-rock", "hardcore", "emo", "ska"],
+    "jazz": ["jazz", "blues", "soul", "funk"],
+    "blues": ["blues", "jazz", "soul", "gospel"],
+    "folk": ["folk", "acoustic", "singer-songwriter", "songwriter", "bluegrass", "country"],
+    "country": ["country", "folk", "bluegrass", "honky-tonk", "rockabilly"],
+    "classical": ["classical", "piano", "opera", "new-age"],
+    "latin": ["latin", "latino", "reggaeton", "salsa", "samba", "spanish"],
+    "reggae": ["reggae", "dancehall", "dub", "ska"],
+    "dance": ["dance", "edm", "house", "electro", "club", "party"],
+    "trance": ["trance", "progressive-house", "hardstyle", "edm"],
+    "world-music": ["world-music", "indian", "iranian", "turkish", "malay", "afrobeats"],
+    "k-pop": ["k-pop", "j-pop", "mandopop", "cantopop", "pop"],
+    "j-pop": ["j-pop", "j-rock", "j-idol", "j-dance", "anime"],
+}
+
+GENRE_SCORES = {
+    "indie": {
+        "indie": 1.0,
+        "indie-pop": 0.9,
+        "alternative": 0.8,
+        "alt-rock": 0.7,
+        "psych-rock": 0.6,
+    },
+    "rock": {
+        "rock": 1.0,
+        "alt-rock": 0.8,
+        "hard-rock": 0.7,
+        "punk-rock": 0.6,
+        "rock-n-roll": 0.8,
+        "grunge": 0.7,
+    },
+    "pop": {
+        "pop": 1.0,
+        "indie-pop": 0.7,
+        "synth-pop": 0.7,
+        "power-pop": 0.6,
+        "dance": 0.6,
+    },
+    "electronic": {
+        "electronic": 1.0,
+        "edm": 0.8,
+        "electro": 0.8,
+        "house": 0.7,
+        "techno": 0.7,
+        "idm": 0.6,
+    },
+    "house": {
+        "house": 1.0,
+        "deep-house": 0.9,
+        "chicago-house": 0.8,
+        "progressive-house": 0.8,
+        "electro": 0.6,
+    },
+    "techno": {
+        "techno": 1.0,
+        "detroit-techno": 0.9,
+        "minimal-techno": 0.8,
+        "electro": 0.6,
+    },
+    "hip-hop": {
+        "hip-hop": 1.0,
+        "r-n-b": 0.8,
+        "soul": 0.6,
+        "funk": 0.5,
+    },
+    "r-n-b": {
+        "r-n-b": 1.0,
+        "soul": 0.8,
+        "funk": 0.7,
+        "hip-hop": 0.7,
+    },
+    "metal": {
+        "metal": 1.0,
+        "heavy-metal": 0.9,
+        "metalcore": 0.7,
+        "death-metal": 0.6,
+        "black-metal": 0.6,
+        "grindcore": 0.5,
+    },
+    "punk": {
+        "punk": 1.0,
+        "punk-rock": 0.9,
+        "hardcore": 0.7,
+        "emo": 0.6,
+        "ska": 0.5,
+    },
+    "jazz": {
+        "jazz": 1.0,
+        "blues": 0.7,
+        "soul": 0.6,
+        "funk": 0.5,
+    },
+    "blues": {
+        "blues": 1.0,
+        "jazz": 0.7,
+        "soul": 0.6,
+        "gospel": 0.5,
+    },
+    "folk": {
+        "folk": 1.0,
+        "acoustic": 0.8,
+        "singer-songwriter": 0.8,
+        "songwriter": 0.8,
+        "bluegrass": 0.7,
+        "country": 0.6,
+    },
+    "country": {
+        "country": 1.0,
+        "folk": 0.6,
+        "bluegrass": 0.7,
+        "honky-tonk": 0.8,
+        "rockabilly": 0.6,
+    },
+    "classical": {
+        "classical": 1.0,
+        "piano": 0.8,
+        "opera": 0.7,
+        "new-age": 0.5,
+    },
+    "latin": {
+        "latin": 1.0,
+        "latino": 0.9,
+        "reggaeton": 0.7,
+        "salsa": 0.7,
+        "samba": 0.6,
+        "spanish": 0.6,
+    },
+    "reggae": {
+        "reggae": 1.0,
+        "dancehall": 0.8,
+        "dub": 0.7,
+        "ska": 0.6,
+    },
+    "dance": {
+        "dance": 1.0,
+        "edm": 0.8,
+        "house": 0.7,
+        "electro": 0.6,
+        "club": 0.7,
+        "party": 0.6,
+    },
+    "trance": {
+        "trance": 1.0,
+        "progressive-house": 0.7,
+        "hardstyle": 0.6,
+        "edm": 0.6,
+    },
+    "world-music": {
+        "world-music": 1.0,
+        "indian": 0.6,
+        "iranian": 0.6,
+        "turkish": 0.6,
+        "malay": 0.5,
+        "afrobeats": 0.6,
+    },
+    "k-pop": {
+        "k-pop": 1.0,
+        "j-pop": 0.6,
+        "mandopop": 0.5,
+        "cantopop": 0.5,
+        "pop": 0.6,
+    },
+    "j-pop": {
+        "j-pop": 1.0,
+        "j-rock": 0.7,
+        "j-idol": 0.7,
+        "j-dance": 0.6,
+        "anime": 0.6,
+    },
+}
+
 def check_sort_opt(option: str):
     if option not in sort_options:
         raise ValueError('Invalid option')
@@ -57,11 +239,12 @@ def check_sort_opt(option: str):
         return option
 
 def check_genre(genre: str):
-    if genre not in genre_options:
+    if genre not in GENRE_OPTIONS:
         raise ValueError('Invalid genre')
     else:
         return genre
 
+# Used lambda funct instead, no longer needed
 def key_helper(scored_track):
     return scored_track[1]
 
@@ -77,13 +260,21 @@ def calculate_profile(tracks):
 def calculate_similarity(track, profile):
     distance = 0
     if track.energy is not None:
-        distance += 4*abs(track.energy - profile["energy"])
+        distance += 0.4*abs(track.energy - profile["energy"])
     if track.danceability is not None:
-        distance += 3*abs(track.danceability - profile["danceability"])
+        distance += 0.3*abs(track.danceability - profile["danceability"])
     if track.valence is not None:
-        distance += 3*abs(track.valence - profile["valence"])
+        distance += 0.3*abs(track.valence - profile["valence"])
     similarity = (1 - distance) * 100
     return distance, similarity
+
+def calculate_genre_score(candidate_genre, seed_genres):
+    scores = []
+    for seed_genre in seed_genres:
+        score = GENRE_SCORES.get(seed_genre, {}).get(candidate_genre, 0)
+        scores.append(score)
+    #Take maximum as candidate song needs to be strongly related to one of user's interests to be a good discovery
+    return max(scores, default=0)
 
 def similarity_description(difference):
     if difference < 0.05:
@@ -172,7 +363,6 @@ def search_tracks(q: str = Query(min_length=1), limit: int = Query(10, ge=1, le=
         return track_options
 
 ''' app.post is used here as the server is being sent data to compute recommended tracks with'''
-@app.post("/recommend", response_model = list[RecResponse])
 @app.post("/recommend", response_model=list[RecResponse])
 def get_recommendations(
     request: RecRequest,
@@ -184,9 +374,7 @@ def get_recommendations(
     seed_tracks = (
         db.execute(
             select(Track).where(Track.track_id.in_(track_ids))
-        )
-        .scalars()
-        .all()
+            ).scalars().all()
     )
 
     if not seed_tracks:
@@ -194,18 +382,31 @@ def get_recommendations(
 
     profile = calculate_profile(seed_tracks)
 
-    all_tracks = db.execute(select(Track)).scalars().all()
+    seed_genres = set([t.genre for t in seed_tracks])
 
-    for track in all_tracks:
+    similar_genres = np.array([
+        RELATED_GENRES.get(seed_genre, [seed_genre])
+        for seed_genre in seed_genres
+        ])
+
+    genre_filter = np.unique(similar_genres)
+
+    gen_filtered_tracks = db.execute(
+        select(Track).filter(Track.genre.in_(genre_filter))
+        ).scalars().all()
+
+    for track in gen_filtered_tracks:
         if track.track_id in track_ids:
             continue
 
+        genre_score = calculate_genre_score(track.genre, seed_genres)
         difference, similarity = calculate_similarity(track, profile)
+        final_score = 0.85*similarity + 0.15*(genre_score*100)
+
         description = similarity_description(difference)
 
-        recommendations.append(
-            (track, similarity, description)
-        )
+    
+        recommendations.append((track, final_score, description))
 
     recommendations.sort(key=lambda x: x[1], reverse=True)
     recommendations = recommendations[:request.limit]
@@ -220,94 +421,6 @@ def get_recommendations(
         }
         for track, similarity, description in recommendations
     ]
-'''def get_recommendations(request: RecRequest):
-    track_ids = []
-    recommendations = []
-    response = []
-
-    for track in request.tracks:
-        track_ids.append(track.track_id)
-
-    with SessionLocal() as db:
-        seed_tracks = db.execute(select(Track).where(Track.track_id.in_(track_ids))).scalars().all()
-        profile = calculate_profile(seed_tracks)
-
-        all_tracks = db.execute(select(Track)).scalars().all()
-        for track in all_tracks:
-            #Ensure entered tracks do not appear as recommendations
-            if track.track_id in track_ids:
-                continue
-
-            difference, similarity = calculate_similarity(track, profile)
-            description = similarity_description(difference)
-            recommendations.append((track, similarity, description))
-        
-        recommendations.sort(reverse=True, key=key_helper)
-        recommendations = recommendations[:request.limit]
-        
-        if not recommendations:
-            return 'No tracks recommended'
-                
-        for (track, similarity, description) in recommendations:
-            response.append({
-                "track_id": track.track_id,
-                "track_name": track.track_name,
-                "artists": track.artists,
-                "score": similarity,
-                "reason": description
-            })
-                
-        return response    
-'''
-
-'''
-    recommendations = []
-    response = []
-    statement = select(Track)
-
-     Method to compare genre can be more sophisticated 
-    (e.g. pop fans may enjoy indie pop)
-    Maybe use string matching to filter related genres as an improvement
-    if request.genre is not None:
-        statement = statement.filter(Track.track_genre == request.genre)
-
-    with SessionLocal() as db:
-        tracks = db.execute(statement).scalars().all()
-        for track in tracks:
-            This section requires weighting to improve recommendation predictions
-            score = 0
-
-            if request.energy is not None:
-                score += abs(track.energy - request.energy)
-
-            if request.danceability is not None:
-                score += abs(track.danceability - request.danceability)
-
-            if request.valence is not None:
-                score += abs(track.valence - request.valence)
-
-            #Popularity needs to be normalised from 0-100 to 0-1
-            if request.popularity is not None:
-                score += 0.01*abs(track.popularity - request.popularity)
-
-            recommendations.append((track, score))
-
-        recommendations.sort(key=key_helper)
-        recommendations = recommendations[:request.limit]
-
-        if not recommendations:
-            return 'No tracks recommended'
-        
-        for (track, score) in recommendations:
-            response.append({
-                "track_id": track.track_id,
-                "track_name": track.track_name,
-                "artists": track.artists,
-                "score": score
-            })
-        
-        return response
-'''
 
 @app.get("/genre")
 def get_genres():
