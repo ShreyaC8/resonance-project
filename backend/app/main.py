@@ -1,3 +1,4 @@
+import math
 from app.database import Base, engine, SessionLocal
 from app.models import Track
 from app.schemas import TrackQueryResponse, RecRequest, RecResponse
@@ -252,20 +253,95 @@ def calculate_profile(tracks):
     profile = {
         "energy": sum(t.energy for t in tracks) / num_of_tracks,
         "danceability": sum(t.danceability for t in tracks) / num_of_tracks,
-        "valence": sum(t.valence for t in tracks) / num_of_tracks
+        "valence": sum(t.valence for t in tracks) / num_of_tracks,
+        "acousticness": sum(t.acousticness for t in tracks) / num_of_tracks,
+        "instrumentalness": sum(t.instrumentalness for t in tracks) / num_of_tracks,
+        "speechiness": sum(t.speechiness for t in tracks) / num_of_tracks,
+        "tempo": sum(t.tempo for t in tracks) / num_of_tracks,
+        "loudness": sum(t.loudness for t in tracks) / num_of_tracks
     }
     return profile
 
 def calculate_similarity(track, profile):
     distance = 0
     if track.energy is not None:
-        distance += 0.4*abs(track.energy - profile["energy"])
+        distance += 0.2*abs(track.energy - profile["energy"])
     if track.danceability is not None:
-        distance += 0.3*abs(track.danceability - profile["danceability"])
+        distance += 0.2*abs(track.danceability - profile["danceability"])
     if track.valence is not None:
-        distance += 0.3*abs(track.valence - profile["valence"])
+        distance += 0.2*abs(track.valence - profile["valence"])
+    if track.acousticness is not None:
+        distance += 0.08*abs(track.acousticness - profile["acousticness"])
+    if track.instrumentalness is not None:
+        distance += 0.08*abs(track.instrumentalness - profile["instrumentalness"])
+    if track.speechiness is not None:
+        distance += 0.08*abs(track.speechiness - profile["speechiness"])
+    if track.tempo is not None:
+        distance += 0.08*abs((track.tempo - profile["tempo"]) / 243.372)
+    if track.loudness is not None:
+        distance += 0.08*abs((track.loudness - profile["loudness"]) - (-49.531)) / (4.532 - (-49.531))
+    
     similarity = (1 - distance) * 100
     return similarity
+
+def candidate_similarity(track1, track2):
+    distance = (
+        0.2*abs(track1.energy - track2.energy)
+        + 0.2*abs(track1.danceability - track2.danceability)
+        + 0.2*abs(track1.valence - track2.valence)
+        + 0.08*abs(track1.acousticness - track2.acousticness)
+        + 0.08*abs(track1.instrumentalness - track2.instrumentalness)
+        + 0.08*abs(track1.speechiness - track2.speechiness)
+        # Normalising the tempo and loudness to between 0 and 1
+        + 0.08*abs((track1.tempo - track2.tempo) / 243.372)
+        + 0.08*abs((track1.loudness - track2.loudness) - (-49.531)) / (4.532 - (-49.531))
+    )
+    return 1 - distance
+
+def get_feature_vector(track):
+    return [
+        track.energy,
+        track.danceability,
+        track.valence,
+        track.acousticness,
+        track.instrumentalness,
+        track.speechiness,
+        track.tempo / 243.372,
+        (track.loudness - (-49.531)) / (4.532 - (-49.531))
+    ]
+
+def cosine_similarity(vector1, vector2):
+    dot_product = sum(a * b for a,b in zip(vector1, vector2))
+
+    magnitude1 = math.sqrt(sum(a ** 2 for a in vector1))
+    magnitude2 = math.sqrt(sum(b ** 2 for b in vector2))
+
+    if magnitude1 == 0 or magnitude2 == 0:
+        return 0
+
+    return dot_product / (magnitude1 * magnitude2)
+
+def calc_cosine_similarity(track, profile):
+    track_vector = get_feature_vector(track)
+    profile_vector = [
+        profile["energy"],
+        profile["danceability"],
+        profile["valence"],
+        profile["acousticness"],
+        profile["instrumentalness"],
+        profile["speechiness"],
+        # Normalised tempo and loudness values to match 0 to 1 range
+        profile["tempo"] / 243.372,
+        (profile["loudness"] - (-49.531)) / (4.532 - (-49.531))
+    ]
+
+    return cosine_similarity(track_vector, profile_vector) * 100
+
+def candidate_cosine_similarity(track1, track2):
+    vector1 = get_feature_vector(track1)
+    vector2 = get_feature_vector(track2)
+
+    return cosine_similarity(vector1, vector2)
 
 def calculate_genre_score(candidate_genre, seed_genres):
     best_score = 0
@@ -278,16 +354,14 @@ def calculate_genre_score(candidate_genre, seed_genres):
             best_genre = seed_genre
     return best_score, best_genre
 
-def candidate_similarity(track1, track2):
-    distance = (
-        0.4 * abs(track1.energy - track2.energy)
-        + 0.3 * abs(track1.danceability - track2.danceability)
-        + 0.3 * abs(track1.valence - track2.valence)
-    )
-    return 1 - distance
+def mmr_rerank(candidates, limit, lambda_value=0.8, similarity_method="V2"):
+    if similarity_method == "V2":
+        candidate_sim_fn = candidate_similarity
+    elif similarity_method == "V3":
+        candidate_sim_fn = candidate_cosine_similarity
 
-def mmr_rerank(candidates, limit, lambda_value=0.8):
     selected = []
+
     while candidates and len(selected) < limit:
         best_track = None
         best_score = float("-inf")
@@ -300,7 +374,7 @@ def mmr_rerank(candidates, limit, lambda_value=0.8):
                 diversity_penalty = 0
             else:
                 diversity_penalty = max(
-                    candidate_similarity(track, chosen[0])
+                    candidate_sim_fn(track, chosen[0])
                     for chosen in selected
                 )
 
@@ -333,6 +407,30 @@ def genre_reasoning(genre_score, matching_genre):
     else:
         genre_reason = "genre less closely related to your selected tracks"
     return genre_reason
+
+def evaluate_similarity_methods(request: RecRequest, db: Session = Depends(get_db)):
+    #V2 is the 8-feature representation used to calculate similarity based on linear distance
+    #V3 is the cosine version using vector representation 
+    #Due to a lack of user preferences, this function shows how the models differ, not which is objectively better
+
+    v2_results = get_recommendations(request, db, "V2")
+    v3_results = get_recommendations(request, db, "V3")
+
+    avg_rec_score_v2 = sum(v2_recommendation["score"] for v2_recommendation in v2_results) / len(v2_results)
+    avg_rec_score_v3 = sum(v3_recommendation["score"] for v3_recommendation in v3_results) / len(v3_results)
+
+    overlap_score = sum(
+        rec["track_id"] in {v3["track_id"] for v3 in v3_results}
+        for rec in v2_results
+    )
+    overlap_percentage = overlap_score / min(len(v2_results), len(v3_results)) * 100
+
+    return {
+        "v2_average_score": avg_rec_score_v2,
+        "v3_average_score": avg_rec_score_v3,
+        "overlap_count": overlap_score,
+        "overlap_percentage": overlap_percentage
+    }
 
 @app.get("/")
 def basic_message():
@@ -419,8 +517,14 @@ def search_tracks(q: str = Query(min_length=1), limit: int = Query(10, ge=1, le=
 @app.post("/recommend", response_model=list[RecResponse])
 def get_recommendations(
     request: RecRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    similarity_method="V2"
 ):
+    if similarity_method == "V2":
+        similarity_fn = calculate_similarity
+    elif similarity_method == "V3":
+        similarity_fn = calc_cosine_similarity
+
     track_ids = [track.track_id for track in request.tracks]
     recommendations = []
 
@@ -430,6 +534,7 @@ def get_recommendations(
 
     if not seed_tracks:
         raise HTTPException(status_code=404, detail="No matching seed tracks")
+    
     if any(
         t.energy is None or t.danceability is None or t.valence is None 
         for t in seed_tracks
@@ -454,7 +559,7 @@ def get_recommendations(
             continue
 
         genre_score, matching_genre = calculate_genre_score(track.track_genre, seed_genres)
-        similarity = calculate_similarity(track, profile)
+        similarity = similarity_fn(track, profile)
         final_score = 0.85*similarity + 0.15*(genre_score*100)
 
         audio_reason = audio_reasoning(similarity)
@@ -464,7 +569,7 @@ def get_recommendations(
         recommendations.append((track, final_score, description))
 
     recommendations.sort(key=lambda x: x[1], reverse=True)
-    recommendations = mmr_rerank(recommendations, request.limit)
+    recommendations = mmr_rerank(recommendations, request.limit, similarity_method)
 
     return [
         {

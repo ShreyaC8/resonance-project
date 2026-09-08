@@ -11,6 +11,7 @@ class TrackResponse(BaseModel):
     energy : float
     danceability : float
     valence : float
+    
 
 class TrackQueryResponse(BaseModel):
     tracks : list[TrackResponse]
