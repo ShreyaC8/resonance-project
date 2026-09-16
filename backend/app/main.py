@@ -1,4 +1,6 @@
 import math
+import numpy as np
+from app.clustering import get_feature_vector, model, feature_matrix, labels, valid_ids
 from app.database import Base, engine, SessionLocal
 from app.models import Track
 from app.schemas import TrackQueryResponse, RecRequest, RecResponse
@@ -298,18 +300,6 @@ def candidate_similarity(track1, track2):
     )
     return 1 - distance
 
-def get_feature_vector(track):
-    return [
-        track.energy,
-        track.danceability,
-        track.valence,
-        track.acousticness,
-        track.instrumentalness,
-        track.speechiness,
-        track.tempo / 243.372,
-        (track.loudness - (-49.531)) / (4.532 - (-49.531))
-    ]
-
 def cosine_similarity(vector1, vector2):
     dot_product = sum(a * b for a,b in zip(vector1, vector2))
 
@@ -518,12 +508,14 @@ def search_tracks(q: str = Query(min_length=1), limit: int = Query(10, ge=1, le=
 def get_recommendations(
     request: RecRequest,
     db: Session = Depends(get_db),
-    similarity_method="V2"
+    similarity_method="V3"
 ):
     if similarity_method == "V2":
         similarity_fn = calculate_similarity
     elif similarity_method == "V3":
         similarity_fn = calc_cosine_similarity
+    else:
+        raise ValueError("Invalid similarity method argument")
 
     track_ids = [track.track_id for track in request.tracks]
     recommendations = []
@@ -543,18 +535,42 @@ def get_recommendations(
 
     profile = calculate_profile(seed_tracks)
 
-    seed_genres = set([t.track_genre for t in seed_tracks])
+    '''Getting tracks in profile's cluster according to kmeans model'''
+    profile_vector = [profile["energy"], 
+                      profile["danceability"], 
+                      profile["valence"],
+                      profile["acousticness"], 
+                      profile["instrumentalness"], 
+                      profile["speechiness"],
+                      profile["tempo"] / 243.372, 
+                      (profile["loudness"] - (-49.531)) / (4.532 - (-49.531))]
+    profile_cluster = model.predict([profile_vector])[0]
+    print("Cluster:", profile_cluster)
+
+    same_cluster_indices = np.where(labels == profile_cluster)[0]
+    same_cluster_ids = [valid_ids[index] for index in same_cluster_indices]
+
+    '''Creating filter for similar genres to those of seed tracks'''
+    seed_genres = set([t.track_genre for t in seed_tracks if t.track_genre is not None])
 
     genre_filter = {genre
         for seed_genre in seed_genres
         for genre in RELATED_GENRES.get(seed_genre, [seed_genre])
     }
 
-    gen_filtered_tracks = db.execute(
-        select(Track).filter(Track.track_genre.in_(genre_filter))
-        ).scalars().all()
+    '''Filtering tracks in same cluster that have similar genres to the seed tracks'''
+    if not genre_filter:
+        filtered_tracks = db.execute(
+            select(Track).filter(Track.track_id.in_(same_cluster_ids))
+            ).scalars().all()
+    else:
+        filtered_tracks = db.execute(
+            select(Track)
+            .filter((Track.track_id.in_(same_cluster_ids)) &
+                    (Track.track_genre.in_(genre_filter)))
+            ).scalars().all()
 
-    for track in gen_filtered_tracks:
+    for track in filtered_tracks:
         if track.track_id in track_ids:
             continue
 

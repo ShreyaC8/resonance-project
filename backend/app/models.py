@@ -31,4 +31,3 @@ class Track(Base):
     liveness = Column(Float)
     tempo = Column(Float)
     time_signature = Column(Integer)
-

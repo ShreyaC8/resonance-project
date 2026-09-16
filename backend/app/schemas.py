@@ -11,7 +11,6 @@ class TrackResponse(BaseModel):
     energy : float
     danceability : float
     valence : float
-    
 
 class TrackQueryResponse(BaseModel):
     tracks : list[TrackResponse]
@@ -36,4 +35,3 @@ class RecResponse(BaseModel):
     artists : str
     score : float
     reason : str
-
