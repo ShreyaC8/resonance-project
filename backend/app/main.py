@@ -9,8 +9,9 @@ from fastapi import FastAPI, Query, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Annotated
 from pydantic import AfterValidator
-from sqlalchemy import select, func, distinct, or_
+from sqlalchemy import select, func, distinct, or_, desc
 from sqlalchemy.orm import Session
+from sklearn.cluster import MiniBatchKMeans
 
 app = FastAPI()
 
@@ -252,6 +253,20 @@ def calculate_profile(tracks):
         "loudness": sum(t.loudness for t in tracks) / num_of_tracks
     }
     return profile
+
+def calculate_catalogue_profile(matrix):
+    mat_arr = np.array(matrix)
+    result = np.mean(mat_arr, axis=0)
+    return {
+        "energy": float(result[0]),
+        "danceability": float(result[1]),
+        "valence": float(result[2]),
+        "acousticness": float(result[3]),
+        "instrumentalness": float(result[4]),
+        "speechiness": float(result[5]),
+        "tempo": float(result[6]),
+        "loudness": float(result[7])
+    }
 
 def calculate_similarity(track, profile):
     distance = 0
@@ -639,29 +654,97 @@ def get_genres():
         genres = db.execute(select(distinct(Track.track_genre))).scalars().all()
         return genres
 
+def select_diverse_tracks(popular_ids, n_tracks=1500, n_regions=150):
+    feature_array = np.asarray(feature_matrix)
+
+    popular_id_set = set(popular_ids)
+
+    remaining_indices = [
+        index
+        for index, track_id in enumerate(valid_ids)
+        if track_id not in popular_id_set
+    ]
+
+    remaining_features = feature_array[remaining_indices]
+
+    kmeans = MiniBatchKMeans(
+        n_clusters=n_regions,
+        random_state=42,
+        n_init=3,
+        batch_size=4096
+    )
+
+    region_labels = kmeans.fit_predict(remaining_features)
+
+    selected_indices = []
+
+    tracks_per_region = n_tracks // n_regions
+
+    for region in range(n_regions):
+        region_positions = np.where(region_labels == region)[0]
+
+        region_indices = [
+            remaining_indices[position]
+            for position in region_positions
+        ]
+
+        centroid = kmeans.cluster_centers_[region]
+
+        distances = [
+            np.linalg.norm(feature_array[index] - centroid)
+            for index in region_indices
+        ]
+
+        closest = np.argsort(distances)[:tracks_per_region]
+
+        selected_indices.extend(
+            region_indices[position]
+            for position in closest
+        )
+
+    return [
+        valid_ids[index]
+        for index in selected_indices
+    ]
+
 @app.get("/taste-map")
 def get_taste_map(seed_tracks: str | None = None, db: Session = Depends(get_db)):
-    display_ids = valid_ids[:5000]
+    ordered_tracks = db.execute(
+        select(Track).where(Track.track_id.in_(valid_ids)).order_by(desc(Track.popularity))
+        .limit(3500)
+        ).scalars().all()
+    ordered_ids = [ordered_track.track_id for ordered_track in ordered_tracks]
 
-    tracks = db.execute(
-        select(Track).where(Track.track_id.in_(display_ids))
+    diverse_ids = select_diverse_tracks(ordered_ids)
+    print(len(diverse_ids))
+    diverse_tracks = db.execute(
+        select(Track).where(Track.track_id.in_(diverse_ids))
         ).scalars().all()
 
+    tracks = list(ordered_tracks+diverse_tracks)
+    display_ids = ordered_ids + diverse_ids
+    print(len(set(display_ids)) == 5000)
     track_lookup = {track.track_id: track for track in tracks}
 
+    id_to_index = {
+        track_id: index
+        for index, track_id in enumerate(valid_ids)
+    }
     result = []
 
-    for index, track_id in enumerate(display_ids):
-        track = track_lookup.get(track_id)
+    for track_id in display_ids:
+        current_track = track_lookup.get(track_id)
 
-        if track is None:
+        if current_track is None:
             continue
 
+        index = id_to_index[current_track.track_id]
+
         result.append({
-            "track_id": track.track_id,
-            "track_name": track.track_name,
-            "artists": track.artists,
-            "genre": track.track_genre,
+            "track_id": current_track.track_id,
+            "track_name": current_track.track_name,
+            "artists": current_track.artists,
+            "genre": current_track.track_genre,
             "cluster": int(labels[index]),
             "x": float(coordinates[index][0]),
             "y": float(coordinates[index][1])
@@ -700,4 +783,32 @@ def get_taste_map(seed_tracks: str | None = None, db: Session = Depends(get_db))
         "explained_variance": explained_variance.tolist(),
         "user_position": user_position,
         "tracks": result
+    }
+
+@app.get("/taste-dna")
+def get_taste_dna(seed_tracks: str | None = None, db: Session = Depends(get_db)):
+    if not seed_tracks:
+        raise HTTPException(
+            status_code=404,
+            detail="No valid seed tracks found"
+        )
+
+    catalogue_profile = calculate_catalogue_profile(feature_matrix)
+
+    track_ids = seed_tracks.split(",")
+    
+    user_tracks = db.execute(
+        select(Track).where(Track.track_id.in_(track_ids))
+        ).scalars().all()
+
+    if not user_tracks:
+        raise HTTPException(
+            status_code=404,
+            detail="No valid seed tracks found"
+        )
+    user_profile = calculate_profile(user_tracks)
+
+    return {
+        "user_profile": user_profile,
+        "catalogue_profile": catalogue_profile
     }
