@@ -48,7 +48,7 @@ def import_tracks(dataframe, database):
 def main():
     Base.metadata.create_all(engine)
     db = SessionLocal()
-    df = load_dataset("data/spotifydatabase.csv")
+    df = load_dataset("data/spotifydb_clean.csv")
     if df is not None:
         num_of_imports = import_tracks(df, db)
         print(f"Loaded {num_of_imports} songs")
