@@ -1,16 +1,26 @@
 import math
 import numpy as np
-from app.clustering import get_feature_vector, model, feature_matrix, labels, valid_ids
+from app.clustering import get_feature_vector, gmm_model, cluster_probs, feature_matrix, labels, valid_ids
 from app.database import Base, engine, SessionLocal
 from app.models import Track
 from app.schemas import TrackQueryResponse, RecRequest, RecResponse
+from app.visualisations import coordinates, explained_variance, project_profile
 from fastapi import FastAPI, Query, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Annotated
 from pydantic import AfterValidator
 from sqlalchemy import select, func, distinct, or_
 from sqlalchemy.orm import Session
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 #For unit testing:
 def get_db():
@@ -54,185 +64,164 @@ GENRE_OPTIONS = [
     ]
 
 RELATED_GENRES = {
-    "indie": ["indie", "indie-pop", "alternative", "alt-rock", "psych-rock"],
-    "rock": ["rock", "alt-rock", "hard-rock", "punk-rock", "rock-n-roll", "grunge"],
-    "pop": ["pop", "indie-pop", "synth-pop", "power-pop", "dance"],
-    "electronic": ["electronic", "edm", "electro", "house", "techno", "idm"],
-    "house": ["house", "deep-house", "chicago-house", "progressive-house", "electro"],
-    "techno": ["techno", "detroit-techno", "minimal-techno", "electro"],
-    "hip-hop": ["hip-hop", "r-n-b", "soul", "funk"],
-    "r-n-b": ["r-n-b", "soul", "funk", "hip-hop"],
-    "metal": ["metal", "heavy-metal", "metalcore", "death-metal", "black-metal", "grindcore"],
-    "punk": ["punk", "punk-rock", "hardcore", "emo", "ska"],
-    "jazz": ["jazz", "blues", "soul", "funk"],
-    "blues": ["blues", "jazz", "soul", "gospel"],
-    "folk": ["folk", "acoustic", "singer-songwriter", "songwriter", "bluegrass", "country"],
+    "indie": ["indie", "indie-pop", "alternative", "alt-rock", "psych-rock", "garage"],
+    "rock": ["rock", "alt-rock", "hard-rock", "punk-rock", "rock-n-roll", "grunge",
+             "psych-rock", "garage", "british"],
+    "pop": ["pop", "indie-pop", "synth-pop", "power-pop", "dance", "pop-film",
+            "k-pop", "mandopop", "cantopop", "j-pop"],
+    "electronic": ["electronic", "edm", "electro", "house", "techno", "idm",
+                   "dubstep", "drum-and-base", "breakbeat", "industrial",
+                   "chicago-house", "deep-house", "detroit-techno",
+                   "minimal-techno", "progressive-house", "hardstyle",
+                   "garage", "dance", "club", "trance"],
+    "house": ["house", "deep-house", "chicago-house", "progressive-house",
+              "electro", "garage"],
+    "techno": ["techno", "detroit-techno", "minimal-techno", "electro", "idm",
+               "industrial"],
+    "trip-hop": ["trip-hop", "dub", "chill", "ambient"],
+    "dubstep": ["dubstep", "drum-and-base", "breakbeat", "hardcore", "hardstyle"],
+    "hip-hop": ["hip-hop", "r-n-b", "soul", "funk", "dancehall"],
+    "r-n-b": ["r-n-b", "soul", "funk", "hip-hop", "gospel"],
+    "metal": ["metal", "heavy-metal", "metalcore", "death-metal", "black-metal",
+              "grindcore", "industrial", "goth"],
+    "punk": ["punk", "punk-rock", "hardcore", "emo", "ska", "goth"],
+    "jazz": ["jazz", "blues", "soul", "funk", "groove"],
+    "blues": ["blues", "jazz", "soul", "gospel", "groove"],
+    "folk": ["folk", "acoustic", "singer-songwriter", "songwriter", "bluegrass",
+             "country", "guitar"],
     "country": ["country", "folk", "bluegrass", "honky-tonk", "rockabilly"],
-    "classical": ["classical", "piano", "opera", "new-age"],
-    "latin": ["latin", "latino", "reggaeton", "salsa", "samba", "spanish"],
+    "classical": ["classical", "piano", "opera", "new-age", "romance", "show-tunes"],
+    "latin": ["latin", "latino", "reggaeton", "salsa", "samba", "spanish",
+              "brazil", "forro", "mpb", "pagode", "sertanejo", "tango"],
     "reggae": ["reggae", "dancehall", "dub", "ska"],
-    "dance": ["dance", "edm", "house", "electro", "club", "party"],
+    "dance": ["dance", "edm", "house", "electro", "club", "party", "disco"],
     "trance": ["trance", "progressive-house", "hardstyle", "edm"],
-    "world-music": ["world-music", "indian", "iranian", "turkish", "malay", "afrobeats"],
+    "world-music": ["world-music", "indian", "iranian", "turkish", "malay",
+                     "afrobeats", "french", "german", "swedish"],
     "k-pop": ["k-pop", "j-pop", "mandopop", "cantopop", "pop"],
     "j-pop": ["j-pop", "j-rock", "j-idol", "j-dance", "anime"],
+    "children": ["children", "kids", "disney", "comedy"],
+    "mood": ["chill", "sleep", "study", "happy", "sad", "romance", "ambient",
+             "new-age", "party", "comedy", "disney"],
 }
 
 GENRE_SCORES = {
     "indie": {
-        "indie": 1.0,
-        "indie-pop": 0.9,
-        "alternative": 0.8,
-        "alt-rock": 0.7,
-        "psych-rock": 0.6,
+        "indie": 1.0, "indie-pop": 0.9, "alternative": 0.8, "alt-rock": 0.7,
+        "psych-rock": 0.6, "garage": 0.5,
     },
     "rock": {
-        "rock": 1.0,
-        "alt-rock": 0.8,
-        "hard-rock": 0.7,
-        "punk-rock": 0.6,
-        "rock-n-roll": 0.8,
-        "grunge": 0.7,
+        "rock": 1.0, "alt-rock": 0.8, "hard-rock": 0.7, "punk-rock": 0.6,
+        "rock-n-roll": 0.8, "grunge": 0.7, "psych-rock": 0.6, "garage": 0.5,
+        "british": 0.5,
     },
     "pop": {
-        "pop": 1.0,
-        "indie-pop": 0.7,
-        "synth-pop": 0.7,
-        "power-pop": 0.6,
-        "dance": 0.6,
+        "pop": 1.0, "indie-pop": 0.7, "synth-pop": 0.7, "power-pop": 0.6,
+        "dance": 0.6, "pop-film": 0.6, "k-pop": 0.5, "mandopop": 0.5,
+        "cantopop": 0.5, "j-pop": 0.5,
     },
     "electronic": {
-        "electronic": 1.0,
-        "edm": 0.8,
-        "electro": 0.8,
-        "house": 0.7,
-        "techno": 0.7,
-        "idm": 0.6,
+        "electronic": 1.0, "edm": 0.8, "electro": 0.8, "house": 0.7,
+        "techno": 0.7, "idm": 0.6, "dubstep": 0.6, "drum-and-base": 0.6,
+        "breakbeat": 0.6, "industrial": 0.5, "chicago-house": 0.6,
+        "deep-house": 0.6, "detroit-techno": 0.6, "minimal-techno": 0.6,
+        "progressive-house": 0.7, "hardstyle": 0.6, "garage": 0.5,
+        "dance": 0.6, "club": 0.5, "trance": 0.6,
     },
     "house": {
-        "house": 1.0,
-        "deep-house": 0.9,
-        "chicago-house": 0.8,
-        "progressive-house": 0.8,
-        "electro": 0.6,
+        "house": 1.0, "deep-house": 0.9, "chicago-house": 0.8,
+        "progressive-house": 0.8, "electro": 0.6, "garage": 0.5,
     },
     "techno": {
-        "techno": 1.0,
-        "detroit-techno": 0.9,
-        "minimal-techno": 0.8,
-        "electro": 0.6,
+        "techno": 1.0, "detroit-techno": 0.9, "minimal-techno": 0.8,
+        "electro": 0.6, "idm": 0.5, "industrial": 0.5,
+    },
+    "trip-hop": {
+        "trip-hop": 1.0, "dub": 0.6, "chill": 0.6, "ambient": 0.5,
+    },
+    "dubstep": {
+        "dubstep": 1.0, "drum-and-base": 0.7, "breakbeat": 0.6,
+        "hardcore": 0.5, "hardstyle": 0.6,
     },
     "hip-hop": {
-        "hip-hop": 1.0,
-        "r-n-b": 0.8,
-        "soul": 0.6,
-        "funk": 0.5,
+        "hip-hop": 1.0, "r-n-b": 0.8, "soul": 0.6, "funk": 0.5,
+        "dancehall": 0.5,
     },
     "r-n-b": {
-        "r-n-b": 1.0,
-        "soul": 0.8,
-        "funk": 0.7,
-        "hip-hop": 0.7,
+        "r-n-b": 1.0, "soul": 0.8, "funk": 0.7, "hip-hop": 0.7, "gospel": 0.5,
     },
     "metal": {
-        "metal": 1.0,
-        "heavy-metal": 0.9,
-        "metalcore": 0.7,
-        "death-metal": 0.6,
-        "black-metal": 0.6,
-        "grindcore": 0.5,
+        "metal": 1.0, "heavy-metal": 0.9, "metalcore": 0.7, "death-metal": 0.6,
+        "black-metal": 0.6, "grindcore": 0.5, "industrial": 0.5, "goth": 0.5,
     },
     "punk": {
-        "punk": 1.0,
-        "punk-rock": 0.9,
-        "hardcore": 0.7,
-        "emo": 0.6,
-        "ska": 0.5,
+        "punk": 1.0, "punk-rock": 0.9, "hardcore": 0.7, "emo": 0.6,
+        "ska": 0.5, "goth": 0.4,
     },
     "jazz": {
-        "jazz": 1.0,
-        "blues": 0.7,
-        "soul": 0.6,
-        "funk": 0.5,
+        "jazz": 1.0, "blues": 0.7, "soul": 0.6, "funk": 0.5, "groove": 0.5,
     },
     "blues": {
-        "blues": 1.0,
-        "jazz": 0.7,
-        "soul": 0.6,
-        "gospel": 0.5,
+        "blues": 1.0, "jazz": 0.7, "soul": 0.6, "gospel": 0.5, "groove": 0.5,
     },
     "folk": {
-        "folk": 1.0,
-        "acoustic": 0.8,
-        "singer-songwriter": 0.8,
-        "songwriter": 0.8,
-        "bluegrass": 0.7,
-        "country": 0.6,
+        "folk": 1.0, "acoustic": 0.8, "singer-songwriter": 0.8,
+        "songwriter": 0.8, "bluegrass": 0.7, "country": 0.6, "guitar": 0.6,
     },
     "country": {
-        "country": 1.0,
-        "folk": 0.6,
-        "bluegrass": 0.7,
-        "honky-tonk": 0.8,
+        "country": 1.0, "folk": 0.6, "bluegrass": 0.7, "honky-tonk": 0.8,
         "rockabilly": 0.6,
     },
     "classical": {
-        "classical": 1.0,
-        "piano": 0.8,
-        "opera": 0.7,
-        "new-age": 0.5,
+        "classical": 1.0, "piano": 0.8, "opera": 0.7, "new-age": 0.5,
+        "romance": 0.4, "show-tunes": 0.5,
     },
     "latin": {
-        "latin": 1.0,
-        "latino": 0.9,
-        "reggaeton": 0.7,
-        "salsa": 0.7,
-        "samba": 0.6,
-        "spanish": 0.6,
+        "latin": 1.0, "latino": 0.9, "reggaeton": 0.7, "salsa": 0.7,
+        "samba": 0.6, "spanish": 0.6, "brazil": 0.6, "forro": 0.5,
+        "mpb": 0.5, "pagode": 0.5, "sertanejo": 0.5, "tango": 0.5,
     },
     "reggae": {
-        "reggae": 1.0,
-        "dancehall": 0.8,
-        "dub": 0.7,
-        "ska": 0.6,
+        "reggae": 1.0, "dancehall": 0.8, "dub": 0.7, "ska": 0.6,
     },
     "dance": {
-        "dance": 1.0,
-        "edm": 0.8,
-        "house": 0.7,
-        "electro": 0.6,
-        "club": 0.7,
-        "party": 0.6,
+        "dance": 1.0, "edm": 0.8, "house": 0.7, "electro": 0.6,
+        "club": 0.7, "party": 0.6, "disco": 0.6,
     },
     "trance": {
-        "trance": 1.0,
-        "progressive-house": 0.7,
-        "hardstyle": 0.6,
-        "edm": 0.6,
+        "trance": 1.0, "progressive-house": 0.7, "hardstyle": 0.6, "edm": 0.6,
     },
     "world-music": {
-        "world-music": 1.0,
-        "indian": 0.6,
-        "iranian": 0.6,
-        "turkish": 0.6,
-        "malay": 0.5,
-        "afrobeats": 0.6,
+        "world-music": 1.0, "indian": 0.6, "iranian": 0.6, "turkish": 0.6,
+        "malay": 0.5, "afrobeats": 0.6, "french": 0.4, "german": 0.4,
+        "swedish": 0.4,
     },
     "k-pop": {
-        "k-pop": 1.0,
-        "j-pop": 0.6,
-        "mandopop": 0.5,
-        "cantopop": 0.5,
+        "k-pop": 1.0, "j-pop": 0.6, "mandopop": 0.5, "cantopop": 0.5,
         "pop": 0.6,
     },
     "j-pop": {
-        "j-pop": 1.0,
-        "j-rock": 0.7,
-        "j-idol": 0.7,
-        "j-dance": 0.6,
+        "j-pop": 1.0, "j-rock": 0.7, "j-idol": 0.7, "j-dance": 0.6,
         "anime": 0.6,
     },
+    "children": {
+        "children": 1.0, "kids": 0.9, "disney": 0.6, "comedy": 0.4,
+    },
+    "mood": {
+        "chill": 0.7, "sleep": 0.6, "study": 0.6, "happy": 0.6, "sad": 0.6,
+        "romance": 0.5, "ambient": 0.6, "new-age": 0.5, "party": 0.5,
+        "comedy": 0.4, "disney": 0.4,
+    },
 }
+
+def get_related_genres(seed_genre):
+    """Return the seed genre plus every genre that shares a category with it."""
+    related = {seed_genre}
+    for cat, members in RELATED_GENRES.items():
+        if seed_genre == cat or seed_genre in members:
+            related.add(cat)
+            related.update(members)
+    return related
 
 def check_sort_opt(option: str):
     if option not in sort_options:
@@ -336,12 +325,19 @@ def candidate_cosine_similarity(track1, track2):
 def calculate_genre_score(candidate_genre, seed_genres):
     best_score = 0
     best_genre = None
+
     for seed_genre in seed_genres:
-        score = GENRE_SCORES.get(seed_genre, {}).get(candidate_genre, 0)
+        # Find every category this seed genre belongs to (including itself, if it IS a category)
+        categories = {
+            cat for cat, members in RELATED_GENRES.items()
+            if seed_genre == cat or seed_genre in members
+        }
         #Take maximum as candidate song needs to be strongly related to one of user's interests to be a good discovery
-        if score > best_score:
-            best_score = score
-            best_genre = seed_genre
+        for cat in categories:
+            score = GENRE_SCORES.get(cat, {}).get(candidate_genre, 0)
+            if score > best_score:
+                best_score = score
+                best_genre = cat
     return best_score, best_genre
 
 def mmr_rerank(candidates, limit, lambda_value=0.8, similarity_method="V2"):
@@ -349,6 +345,20 @@ def mmr_rerank(candidates, limit, lambda_value=0.8, similarity_method="V2"):
         candidate_sim_fn = candidate_similarity
     elif similarity_method == "V3":
         candidate_sim_fn = candidate_cosine_similarity
+    else:
+        raise ValueError("Invalid similarity method argument")
+
+    # --- Dedup seed candidates by (track_name, artists) before scoring ---
+    seen = set()
+    deduped_candidates = []
+    for candidate in candidates:
+        track = candidate[0]
+        key = (track.track_name, track.artists)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_candidates.append(candidate)
+    candidates = deduped_candidates
 
     selected = []
 
@@ -369,15 +379,18 @@ def mmr_rerank(candidates, limit, lambda_value=0.8, similarity_method="V2"):
                 )
 
             mmr_score = (
-                lambda_value * relevance - (1 - lambda_value) * diversity_penalty
+                lambda_value * float(relevance) - (1 - lambda_value) * float(diversity_penalty)
             )
 
             if mmr_score > best_score:
                 best_score = mmr_score
                 best_track = candidate
 
+        print(f"-> selected: {best_track[0].track_name!r} (score={best_score:.4f})\n")
+
         selected.append(best_track)
         candidates.remove(best_track)
+
     return selected
 
 def audio_reasoning(similarity):
@@ -501,14 +514,21 @@ def search_tracks(q: str = Query(min_length=1), limit: int = Query(10, ge=1, le=
         track_options = db.execute(statement).all()
         if not track_options:
             raise HTTPException(status_code=404, detail="No matching results")
-        return track_options
+        return [
+            {
+                "track_id": track.track_id,
+                "track_name": track.track_name,
+                "artists": track.artists,
+            }
+            for track in track_options
+        ]
 
 ''' app.post is used here as the server is being sent data to compute recommended tracks with'''
 @app.post("/recommend", response_model=list[RecResponse])
 def get_recommendations(
     request: RecRequest,
     db: Session = Depends(get_db),
-    similarity_method="V3"
+    similarity_method="V2"
 ):
     if similarity_method == "V2":
         similarity_fn = calculate_similarity
@@ -535,7 +555,7 @@ def get_recommendations(
 
     profile = calculate_profile(seed_tracks)
 
-    '''Getting tracks in profile's cluster according to kmeans model'''
+    '''Getting tracks in profile's cluster according to gmm'''
     profile_vector = [profile["energy"], 
                       profile["danceability"], 
                       profile["valence"],
@@ -544,19 +564,30 @@ def get_recommendations(
                       profile["speechiness"],
                       profile["tempo"] / 243.372, 
                       (profile["loudness"] - (-49.531)) / (4.532 - (-49.531))]
-    profile_cluster = model.predict([profile_vector])[0]
-    print("Cluster:", profile_cluster)
+    profile_membership = gmm_model.predict_proba([profile_vector])[0]
+    print("Profile cluster membership:", profile_membership)
 
-    same_cluster_indices = np.where(labels == profile_cluster)[0]
-    same_cluster_ids = [valid_ids[index] for index in same_cluster_indices]
+    MEMBERSHIP_THRESHOLD = 0.15  # tune this: lower = more permissive, more candidates included
+    relevant_clusters = {
+        i for i, prob in enumerate(profile_membership) if prob > MEMBERSHIP_THRESHOLD
+    }
+    print("Relevant clusters:", relevant_clusters)
+
+    candidate_indices = [
+        i for i in range(len(valid_ids))
+        if any(cluster_probs[i][c] > MEMBERSHIP_THRESHOLD for c in relevant_clusters)
+    ]
+    same_cluster_ids = [valid_ids[i] for i in candidate_indices]
 
     '''Creating filter for similar genres to those of seed tracks'''
     seed_genres = set([t.track_genre for t in seed_tracks if t.track_genre is not None])
 
-    genre_filter = {genre
+    genre_filter = {
+        genre
         for seed_genre in seed_genres
-        for genre in RELATED_GENRES.get(seed_genre, [seed_genre])
+        for genre in get_related_genres(seed_genre)
     }
+    print("Genre filter:", genre_filter)
 
     '''Filtering tracks in same cluster that have similar genres to the seed tracks'''
     if not genre_filter:
@@ -585,7 +616,11 @@ def get_recommendations(
         recommendations.append((track, final_score, description))
 
     recommendations.sort(key=lambda x: x[1], reverse=True)
-    recommendations = mmr_rerank(recommendations, request.limit, similarity_method)
+    print("Top 15 pre-MMR scores:")
+    for track, final_score, description in recommendations[:15]:
+        print(f"  {track.track_name!r} by {track.artists!r} score={final_score:.4f}")
+
+    recommendations = mmr_rerank(recommendations, request.limit, similarity_method=similarity_method)
 
     return [
         {
@@ -603,3 +638,66 @@ def get_genres():
     with SessionLocal() as db:
         genres = db.execute(select(distinct(Track.track_genre))).scalars().all()
         return genres
+
+@app.get("/taste-map")
+def get_taste_map(seed_tracks: str | None = None, db: Session = Depends(get_db)):
+    display_ids = valid_ids[:5000]
+
+    tracks = db.execute(
+        select(Track).where(Track.track_id.in_(display_ids))
+        ).scalars().all()
+
+    track_lookup = {track.track_id: track for track in tracks}
+
+    result = []
+
+    for index, track_id in enumerate(display_ids):
+        track = track_lookup.get(track_id)
+
+        if track is None:
+            continue
+
+        result.append({
+            "track_id": track.track_id,
+            "track_name": track.track_name,
+            "artists": track.artists,
+            "genre": track.track_genre,
+            "cluster": int(labels[index]),
+            "x": float(coordinates[index][0]),
+            "y": float(coordinates[index][1])
+        })
+
+    user_position = None
+
+    if seed_tracks:
+        print("TRACKS RECEIVED")
+        track_ids = seed_tracks.split(",")
+
+        user_tracks = db.execute(
+            select(Track).where(Track.track_id.in_(track_ids))
+            ).scalars().all()
+
+        if user_tracks:
+            profile = calculate_profile(user_tracks)
+            profile_vector = [
+                profile["energy"], 
+                profile["danceability"], 
+                profile["valence"],
+                profile["acousticness"], 
+                profile["instrumentalness"], 
+                profile["speechiness"],
+                profile["tempo"] / 243.372, 
+                (profile["loudness"] - (-49.531)) / (4.532 - (-49.531))
+            ]
+            x, y = project_profile(profile_vector)
+
+            user_position = {
+                "x": float(x),
+                "y": float(y)
+            }
+
+    return {
+        "explained_variance": explained_variance.tolist(),
+        "user_position": user_position,
+        "tracks": result
+    }
