@@ -133,3 +133,4 @@ logs/
 # =========================
 
 *.bak
+frontend/.gitignore
